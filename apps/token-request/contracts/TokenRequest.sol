@@ -35,6 +35,8 @@ contract TokenRequest is AragonApp {
     string private constant ERROR_ETH_TRANSFER_FAILED = "TOKEN_REQUEST_ETH_TRANSFER_FAILED";
     string private constant ERROR_TOKEN_TRANSFER_REVERTED = "TOKEN_REQUEST_TOKEN_TRANSFER_REVERTED";
     string private constant ERROR_NO_REQUEST = "TOKEN_REQUEST_NO_REQUEST";
+    string private constant ERROR_WRONG_VESTING_DATE = "TOKEN_REQUEST_INCORRECT_VESTING_PARAMS";
+    string private constant ERROR_WRONG_TOKEN_AMOUNT_IN_TM = "TOKEN_REQUEST_NOT_ENOUGH_TOKENS_AT_TOKEN_MANAGER";    
 
     uint256 public constant MAX_ACCEPTED_DEPOSIT_TOKENS = 100;
 
@@ -46,6 +48,10 @@ contract TokenRequest is AragonApp {
         uint256 depositAmount;
         uint256 requestAmount;
         Status status;
+        uint64 vestingStart;
+        uint64 vestingCliff;
+        uint64 vestingEnd;
+        bool vestingRevokable;        
     }
 
     TokenManager public tokenManager;
@@ -56,6 +62,11 @@ contract TokenRequest is AragonApp {
     uint256 public nextTokenRequestId;
     mapping(uint256 => TokenRequest) public tokenRequests; // ID => TokenRequest
 
+    uint64 public vestingStartGlobal;  //these are set by the contract owner and will be transmitted to any new vesting
+    uint64 public vestingCliffGlobal;
+    uint64 public vestingEndGlobal;
+    bool public vestingRevokableGlobal;
+        
     event SetTokenManager(address tokenManager);
     event SetVault(address vault);
     event TokenAdded(address indexed token);
@@ -134,6 +145,22 @@ contract TokenRequest is AragonApp {
     }
 
     /**
+    * @notice Set global vesting params to be transmitted to any new token request
+    * @param _start Date the vesting calculations start
+    * @param _cliff Date when the initial portion of tokens are transferable
+    * @param _end Date when all tokens are transferable
+    * @param _revokable Whether the vesting can be revoked by the Token Manager
+    */
+    function setVestingSettings(uint64 _start, uint64 _cliff, uint64 _end, bool _revokable) external auth(MODIFY_TOKENS_ROLE) {
+        require(_start <= _cliff && _cliff <= _end, ERROR_WRONG_VESTING_DATE);
+
+        vestingStartGlobal = _start;
+        vestingCliffGlobal = _cliff;
+        vestingEndGlobal = _end;
+        vestingRevokableGlobal = _revokable;
+    }
+    
+    /**
     * @notice Remove `_token.symbol(): string` from the accepted deposit token request tokens
     * @param _token token address
     */
@@ -156,6 +183,7 @@ contract TokenRequest is AragonApp {
     returns (uint256)
     {
         require(acceptedDepositTokens.contains(_depositToken), ERROR_TOKEN_NOT_ACCEPTED);
+        require(tokenManager.token.balanceOf(address(tokenManager)) >= _requestAmount, ERROR_WRONG_TOKEN_AMOUNT_IN_TM);
 
         if (_depositToken == ETH) {
             require(msg.value == _depositAmount, ERROR_ETH_VALUE_MISMATCH);
@@ -166,8 +194,8 @@ contract TokenRequest is AragonApp {
         uint256 tokenRequestId = nextTokenRequestId;
         nextTokenRequestId++;
 
-        tokenRequests[tokenRequestId] = TokenRequest(msg.sender, _depositToken, _depositAmount, _requestAmount, Status.Pending);
-
+        tokenRequests[tokenRequestId] = TokenRequest(msg.sender, _depositToken, _depositAmount, _requestAmount, Status.Pending, vestingStartGlobal, vestingCliffGlobal, vestingEndGlobal, vestingRevokableGlobal);
+    
         emit TokenRequestCreated(tokenRequestId, msg.sender, _depositToken, _depositAmount, _requestAmount, _reference);
 
         return tokenRequestId;
@@ -214,6 +242,7 @@ contract TokenRequest is AragonApp {
     {
         TokenRequest storage tokenRequest = tokenRequests[_tokenRequestId];
         require(tokenRequest.status == Status.Pending, ERROR_NOT_PENDING);
+        require(tokenManager.token.balanceOf(address(tokenManager)) >= tokenRequest.requestAmount, ERROR_WRONG_TOKEN_AMOUNT_IN_TM);        
 
         tokenRequest.status = Status.Finalised;
 
@@ -221,6 +250,10 @@ contract TokenRequest is AragonApp {
         address depositToken = tokenRequest.depositToken;
         uint256 depositAmount = tokenRequest.depositAmount;
         uint256 requestAmount = tokenRequest.requestAmount;
+        uint64 vestingStart = tokenRequest.vestingStart;
+        uint64 vestingCliff = tokenRequest.vestingCliff;
+        uint64 vestingEnd = tokenRequest.vestingEnd;
+        bool vestingRevokable = tokenRequest.vestingRevokable;         
 
         if (depositAmount > 0) {
             if (depositToken == ETH) {
@@ -231,7 +264,7 @@ contract TokenRequest is AragonApp {
             }
         }
 
-        tokenManager.mint(requesterAddress, requestAmount);
+        tokenManager.assignVested(requesterAddress, requestAmount, vestingStart, vestingCliff, vestingEnd, vestingRevokable);
 
         emit TokenRequestFinalised(_tokenRequestId, requesterAddress, depositToken, depositAmount, requestAmount);
     }
